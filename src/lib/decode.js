@@ -68,7 +68,7 @@ export function parseFrames(bytes) {
     const flag = bytes[o];
     const len = ((bytes[o + 1] << 24) | (bytes[o + 2] << 16) | (bytes[o + 3] << 8) | bytes[o + 4]) >>> 0;
     if (o + 5 + len > bytes.length) break;
-    frames.push({ flag, payload: bytes.subarray(o + 5, o + 5 + len) });
+    frames.push({ flag, payload: bytes.subarray(o + 5, o + 5 + len), end: o + 5 + len });
     o += 5 + len;
   }
   return { frames, leftover: bytes.length - o };
@@ -306,7 +306,7 @@ export async function decodeBody(bytes, contentType, encoding) {
 }
 
 async function decodeFramed(frames, format, encoding, result) {
-  for (const { flag, payload } of frames) {
+  for (const { flag, payload, end } of frames) {
     let p = payload;
     if (flag & 0x01) {
       try {
@@ -325,7 +325,7 @@ async function decodeFramed(frames, format, encoding, result) {
         result.endStream = { raw: utf8Loose.decode(p) };
       }
     } else {
-      result.messages.push(decodeMessage(p, format.json));
+      result.messages.push({ ...decodeMessage(p, format.json), end: format.text ? undefined : end });
     }
   }
   return result;

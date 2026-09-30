@@ -9,6 +9,7 @@ import {
   splitGrpcPath,
   toPlain,
 } from './lib/decode.js';
+import { createJsonView, expandEmbeddedJson, highlightJson, parseJsonString, unwrap } from './lib/jsonview.js';
 
 const devtools = globalThis.chrome && chrome.devtools;
 const tabId = devtools ? devtools.inspectedWindow.tabId : Number(new URLSearchParams(location.search).get('tabId'));
@@ -25,14 +26,13 @@ const els = {
   errorsOnly: $('#errorsOnly'),
   preserve: $('#preserve'),
   detailPane: $('#detailPane'),
-  summary: $('#summary'),
+  subbar: $('#subbar'),
   detail: $('#detail'),
-  jsonView: $('#jsonView'),
 };
 
 const calls = new Map(); // id -> call
 let selectedId = null;
-let activeTab = 'response';
+let activeTab = 'preview';
 
 const prefs = (() => {
   try {
@@ -49,8 +49,15 @@ const savePrefs = () => {
   }
 };
 els.preserve.checked = !!prefs.preserve;
-els.jsonView.checked = !!prefs.json;
-if (prefs.tab) activeTab = prefs.tab;
+if (['headers', 'payload', 'preview', 'response', 'protobuf', 'timing'].includes(prefs.tab)) activeTab = prefs.tab;
+
+const ZOOMS = [0.8, 0.9, 1, 1.1, 1.25, 1.4, 1.6, 1.8];
+function applyZoom() {
+  const z = prefs.zoom || 1.25;
+  document.body.style.zoom = z;
+  $('#zoomLabel').textContent = `${Math.round(z * 100)}%`;
+}
+applyZoom();
 
 // ------------------------------------------------------------------ connection
 
@@ -94,6 +101,8 @@ function applyEvent(evt) {
       status: null,
       chunks: [],
       chunkCount: 0,
+      chunkMarks: [], // [bytesReceivedSoFar, time]
+      received: 0,
       resTruncated: false,
       startTime: evt.startTime,
       responseTime: null,
@@ -117,8 +126,11 @@ function applyEvent(evt) {
     c.responseTime = evt.time;
   } else if (evt.t === 'chunk') {
     if (c.endTime) return;
-    c.chunks.push(base64ToBytes(evt.data));
+    const bytes = base64ToBytes(evt.data);
+    c.chunks.push(bytes);
     c.chunkCount++;
+    c.received += bytes.length;
+    c.chunkMarks.push([c.received, evt.time]);
     if (evt.truncated) c.resTruncated = true;
   } else if (evt.t === 'end') {
     if (c.endTime) return;
@@ -229,11 +241,11 @@ function renderRow(c) {
     tr = document.createElement('tr');
     tr.id = `row-${c.id}`;
     tr.addEventListener('click', () => select(c.id));
-    tr.innerHTML = '<td class="c-method"></td><td class="c-status"></td><td class="c-msgs"></td><td class="c-size"></td><td class="c-time"></td>';
+    tr.innerHTML = '<td class="c-method"></td><td class="c-status"></td><td class="c-type"></td><td class="c-msgs"></td><td class="c-size"></td><td class="c-time"></td>';
     els.tbody.appendChild(tr);
   }
   const st = statusLabel(c);
-  const [tdM, tdS, tdN, tdZ, tdT] = tr.children;
+  const [tdM, tdS, tdY, tdN, tdZ, tdT] = tr.children;
   const svcShort = c.service.split('.').pop();
   tdM.innerHTML = '';
   tdM.append(el('span', 'svc', svcShort ? `${svcShort}/` : ''), document.createTextNode(c.method));
@@ -241,6 +253,7 @@ function renderRow(c) {
   tdS.textContent = st.text;
   tdS.title = st.message || st.text;
   const d = c.decoded;
+  tdY.textContent = d ? d.res.format : '';
   tdN.textContent = d ? `${d.req.messages.length} / ${d.res.messages.length}` : '';
   tdZ.textContent = fmtSize((c.reqBody ? c.reqBody.length : 0) + resBytes(c).length);
   tdT.textContent = fmtMs(c);
@@ -275,6 +288,7 @@ function clearAll() {
 }
 
 function select(id) {
+  if (id !== selectedId) view.depth = 3;
   selectedId = id;
   document.querySelectorAll('#list tr.selected').forEach((r) => r.classList.remove('selected'));
   const tr = document.getElementById(`row-${id}`);
@@ -290,6 +304,13 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+
+function btn(label, onClick, title) {
+  const b = el('button', null, label);
+  if (title) b.title = title;
+  b.addEventListener('click', onClick);
+  return b;
 }
 
 function copyText(text) {
@@ -309,6 +330,15 @@ function messageAsJson(m) {
   return m.text != null ? m.text : { error: m.error, hex: m.hex };
 }
 
+// One message -> that message; a stream -> array of messages.
+function sideValue(side) {
+  const values = side.messages.map((m) => expandEmbeddedJson(messageAsJson(m)));
+  return values.length === 1 ? values[0] : values;
+}
+
+// View state shared by Payload / Preview / Response.
+const view = { search: '', depth: 3 };
+
 function renderDetail() {
   const c = calls.get(selectedId);
   if (!c) {
@@ -316,84 +346,275 @@ function renderDetail() {
     return;
   }
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === activeTab));
-
-  const st = statusLabel(c);
-  els.summary.innerHTML = '';
-  const line1 = el('div');
-  line1.append(el('strong', null, `${c.service}/${c.method}`), document.createTextNode('  '));
-  line1.append(el('span', st.error ? 'status-err' : st.pending ? 'muted' : 'status-ok', st.text));
-  if (st.message) line1.append(document.createTextNode(` — ${st.message}`));
-  const line2 = el('div', 'muted', `${c.httpMethod} ${c.url}`);
-  const meta = [
-    c.status != null ? `HTTP ${c.status}` : null,
-    fmtMs(c),
-    c.source === 'devtools' ? 'from DevTools log' : c.source,
-    c.decoded ? c.decoded.res.format : null,
-  ].filter(Boolean);
-  const line3 = el('div', 'muted', meta.join(' · '));
-  els.summary.append(line1, line2, line3);
-
   const scroll = els.detail.scrollTop;
   els.detail.innerHTML = '';
+  els.subbar.innerHTML = '';
   const d = c.decoded;
   if (!d) {
     els.detail.append(el('p', 'muted', 'Decoding…'));
     return;
   }
-  if (activeTab === 'request') renderMessages(d.req, c.reqTruncated, c.reqBody, c);
-  else if (activeTab === 'response') renderMessages(d.res, c.resTruncated, resBytes(c), c);
-  else if (activeTab === 'headers') renderHeaders(c);
-  else renderRaw(c);
+  if (activeTab === 'headers') renderHeaders(c);
+  else if (activeTab === 'payload') renderTreeTab(c, d.req, true);
+  else if (activeTab === 'preview') renderTreeTab(c, d.res, false);
+  else if (activeTab === 'response') renderSource(c, d.res);
+  else if (activeTab === 'protobuf') renderProtobuf(c);
+  else renderTiming(c);
   els.detail.scrollTop = scroll;
+  // jump to the first match once per new search text
+  if (view.search && view.search !== view.scrolledFor && (activeTab === 'preview' || activeTab === 'payload')) {
+    view.scrolledFor = view.search;
+    const hit = els.detail.querySelector('.jv-hit');
+    if (hit) hit.scrollIntoView({ block: 'center' });
+  }
 }
 
-function renderMessages(side, truncated, raw, c) {
-  const root = els.detail;
-  if (c.source === 'devtools' && side === c.decoded.req) {
-    root.append(el('div', 'warn', 'Request body comes from the DevTools network log and binary bytes may be altered. Calls made from the page (not workers) are captured byte-exact.'));
-  }
-  if (truncated) root.append(el('div', 'warn', 'Body truncated at 10 MB.'));
-  side.warnings.forEach((w) => root.append(el('div', 'warn', w)));
-  if (!raw || !raw.length) {
-    root.append(el('p', 'muted', side === c.decoded.req ? 'Empty request body.' : c.endTime ? 'Empty response body.' : 'Waiting for data…'));
-  }
+function statusBanner(c) {
+  const st = statusLabel(c);
+  if (!st.error) return null;
+  return el('div', 'banner err', `${st.text}${st.message ? ` — ${st.message}` : ''}`);
+}
 
-  const all = [];
+function sideNotices(c, side, isReq) {
+  const out = [];
+  if (isReq && c.source === 'devtools')
+    out.push(el('div', 'banner warn', 'Request body taken from the DevTools network log: binary bytes may be altered.'));
+  if ((isReq ? c.reqTruncated : c.resTruncated)) out.push(el('div', 'banner warn', 'Body truncated at 10 MB.'));
+  side.warnings.forEach((w) => out.push(el('div', 'banner warn', w)));
   side.messages.forEach((m, i) => {
-    const box = el('div', 'msg');
-    const head = el('div', 'msg-head');
-    head.append(el('strong', null, side.messages.length > 1 ? `Message #${i + 1}` : 'Message'), el('span', 'muted', fmtSize(m.size)));
-    head.append(el('span', 'spacer'));
-    const copy = el('button', null, 'Copy JSON');
-    copy.addEventListener('click', () => copyText(JSON.stringify(messageAsJson(m), jsonReplacer, 2)));
-    head.append(copy);
-    const body = el('div', 'msg-body');
-    if (m.error) body.append(el('div', 'error-text', m.error));
-    if (m.fields && !els.jsonView.checked) body.append(renderTree(m.fields));
-    else if (m.fields || m.json !== undefined) body.append(el('pre', null, JSON.stringify(messageAsJson(m), jsonReplacer, 2)));
-    else if (m.text != null) body.append(el('pre', null, m.text));
-    if (m.hex) body.append(el('pre', 'muted', m.hex));
-    box.append(head, body);
-    root.append(box);
-    all.push(messageAsJson(m));
+    if (m.error) out.push(el('div', 'banner err', `${side.messages.length > 1 ? `Message #${i + 1}: ` : ''}${m.error}`));
   });
-
-  if (side.messages.length > 1) {
-    const copyAll = el('button', null, `Copy all ${side.messages.length} messages as JSON`);
-    copyAll.addEventListener('click', () => copyText(JSON.stringify(all, jsonReplacer, 2)));
-    root.prepend(copyAll);
-  }
-  if (side.trailers) {
-    root.append(el('h3', null, 'Trailers'));
-    root.append(kvTable(side.trailers));
-  }
-  if (side.endStream) {
-    root.append(el('h3', null, 'End of stream'));
-    root.append(el('pre', null, JSON.stringify(side.endStream, null, 2)));
-  }
+  return out;
 }
 
-function renderTree(fields, depth = 0) {
+function emptyText(c, isReq) {
+  if (isReq) return 'Empty request body.';
+  return c.endTime ? 'Empty response body.' : 'Waiting for data…';
+}
+
+function searchBox(onChange) {
+  const s = el('input');
+  s.type = 'search';
+  s.placeholder = 'Find in body';
+  s.value = view.search;
+  let t = 0;
+  s.addEventListener('input', () => {
+    clearTimeout(t);
+    t = setTimeout(() => {
+      view.search = s.value;
+      onChange();
+      const again = els.subbar.querySelector('input[type=search]');
+      if (again) {
+        again.focus();
+        again.setSelectionRange(again.value.length, again.value.length);
+      }
+    }, 200);
+  });
+  return s;
+}
+
+function renderTreeTab(c, side, isReq) {
+  const value = sideValue(side);
+  const multi = side.messages.length > 1;
+  const sourceMode = isReq ? prefs.payloadSource : false;
+
+  els.subbar.append(
+    btn('Expand all', () => {
+      view.depth = 100;
+      renderDetail();
+    }, 'Alt+click a node to expand only that subtree'),
+    btn('Collapse all', () => {
+      view.depth = 1;
+      renderDetail();
+    }),
+    searchBox(renderDetail),
+  );
+  if (isReq) {
+    const b = btn(sourceMode ? 'View parsed' : 'View source', () => {
+      prefs.payloadSource = !sourceMode;
+      savePrefs();
+      renderDetail();
+    });
+    els.subbar.append(b);
+  }
+  const matches = el('span', 'muted');
+  els.subbar.append(el('span', 'spacer'), matches, btn(multi ? `Copy ${side.messages.length} messages` : 'Copy JSON', () => copyText(JSON.stringify(unwrap(value, true), jsonReplacer, 2))));
+
+  const root = els.detail;
+  if (!isReq) {
+    const b = statusBanner(c);
+    if (b) root.append(b);
+  }
+  sideNotices(c, side, isReq).forEach((n) => root.append(n));
+  if (!side.messages.length) {
+    root.append(el('p', 'muted', emptyText(c, isReq)));
+    return;
+  }
+  if (sourceMode) {
+    renderSourceBody(root, c, side, true);
+    return;
+  }
+  const tree = createJsonView(value, {
+    expandDepth: view.depth,
+    search: view.search,
+    onCopy: copyText,
+    rootLabel: multi ? `${side.messages.length} messages` : null,
+  });
+  if (view.search) matches.textContent = `${tree.dataset.matches} match${tree.dataset.matches === '1' ? '' : 'es'}`;
+  root.append(tree);
+}
+
+// Response tab: text body, pretty or raw like Chrome's {} toggle.
+function renderSource(c, side) {
+  els.subbar.append(
+    toggle('Pretty print', 'pretty', true),
+    toggle('Wrap lines', 'wrap', true),
+    el('span', 'spacer'),
+    btn('Copy', () => copyText(sourceText(c, side, prefs.pretty !== false))),
+  );
+  const b = statusBanner(c);
+  if (b) els.detail.append(b);
+  sideNotices(c, side, false).forEach((n) => els.detail.append(n));
+  if (!side.messages.length) {
+    els.detail.append(el('p', 'muted', emptyText(c, false)));
+    return;
+  }
+  renderSourceBody(els.detail, c, side, prefs.pretty !== false);
+}
+
+function toggle(label, key, def) {
+  const on = prefs[key] ?? def;
+  const b = btn(label, () => {
+    prefs[key] = !on;
+    savePrefs();
+    renderDetail();
+  });
+  if (on) b.classList.add('on');
+  return b;
+}
+
+function sourceText(c, side, pretty) {
+  if (pretty) return JSON.stringify(unwrap(sideValue(side), true), jsonReplacer, 2);
+  // raw: JSON bodies as received, protobuf as compact JSON with strings untouched; one message per line
+  return side.messages
+    .map((m) => (m.json !== undefined || m.text != null ? m.text ?? JSON.stringify(m.json) : JSON.stringify(messageAsJson(m), jsonReplacer)))
+    .join('\n');
+}
+
+function renderSourceBody(root, c, side, pretty) {
+  const pre = el('pre', `source${prefs.wrap ?? true ? ' wrap' : ''}`);
+  pre.append(highlightJson(sourceText(c, side, pretty)));
+  root.append(pre);
+}
+
+// ---- Headers (Chrome-like General / Response / Request sections, each with raw view)
+
+function kvTable(obj) {
+  const t = el('table', 'kv');
+  Object.keys(obj)
+    .sort()
+    .forEach((k) => {
+      const tr = el('tr');
+      tr.append(el('td', null, k), el('td', null, String(obj[k])));
+      t.append(tr);
+    });
+  return t;
+}
+
+function section(title, obj, key) {
+  const det = el('details', 'sec');
+  det.open = prefs[`sec-${key}`] ?? true;
+  det.addEventListener('toggle', () => {
+    prefs[`sec-${key}`] = det.open;
+    savePrefs();
+  });
+  const sum = el('summary');
+  sum.append(el('span', null, title), el('span', 'muted', obj ? `(${Object.keys(obj).length})` : ''), el('span', 'spacer'));
+  const rawKey = `raw-${key}`;
+  let body;
+  const draw = () => {
+    if (body) body.remove();
+    if (!obj) body = el('p', 'muted', '(none)');
+    else if (prefs[rawKey]) body = el('pre', 'source wrap', Object.keys(obj).map((k) => `${k}: ${obj[k]}`).join('\n'));
+    else body = kvTable(obj);
+    det.append(body);
+  };
+  if (obj && key !== 'general') {
+    const rawBtn = btn('Raw', (e) => {
+      e.preventDefault();
+      prefs[rawKey] = !prefs[rawKey];
+      savePrefs();
+      rawBtn.classList.toggle('on', !!prefs[rawKey]);
+      draw();
+    });
+    rawBtn.classList.toggle('on', !!prefs[rawKey]);
+    sum.append(rawBtn);
+  }
+  det.append(sum);
+  draw();
+  return det;
+}
+
+function renderHeaders(c) {
+  const st = statusLabel(c);
+  const root = els.detail;
+  root.append(
+    section('General', {
+      'Request URL': c.url,
+      Service: c.service,
+      Method: c.method,
+      'HTTP method': c.httpMethod,
+      'HTTP status': c.status != null ? `${c.status} ${c.statusText || ''}`.trim() : '(none)',
+      'gRPC status': `${st.text}${st.message ? ` — ${st.message}` : ''}`,
+      Protocol: c.decoded ? c.decoded.res.format : '',
+      Captured: c.source === 'devtools' ? 'DevTools network log' : c.source,
+      Frame: c.frameUrl || '',
+    }, 'general'),
+  );
+  root.append(section('Response Headers', c.resHeaders, 'res'));
+  if (c.decoded && c.decoded.res.trailers) root.append(section('Trailers', c.decoded.res.trailers, 'trailers'));
+  if (c.decoded && c.decoded.res.endStream) root.append(section('End of stream', flatten(c.decoded.res.endStream), 'endstream'));
+  root.append(section('Request Headers', c.reqHeaders, 'req'));
+}
+
+function flatten(obj, prefix = '', out = {}) {
+  for (const [k, v] of Object.entries(obj || {})) {
+    if (v && typeof v === 'object') flatten(v, `${prefix}${k}.`, out);
+    else out[prefix + k] = v;
+  }
+  return out;
+}
+
+// ---- Protobuf: wire-level view (field numbers, wire types) + hex dump
+
+function renderProtobuf(c) {
+  const root = els.detail;
+  const side = (title, s, bytes) => {
+    root.append(el('h3', null, `${title} · ${fmtSize(bytes ? bytes.length : 0)}`));
+    if (!s.messages.length) root.append(el('p', 'muted', '(empty)'));
+    s.messages.forEach((m, i) => {
+      if (s.messages.length > 1) root.append(el('div', 'msg-sep', `Message #${i + 1}`));
+      if (m.fields) root.append(renderWireTree(m.fields));
+      else if (m.json !== undefined) root.append(el('p', 'muted', 'JSON message (no protobuf wire data).'));
+      else if (m.error) root.append(el('div', 'error-text', m.error));
+    });
+    if (bytes && bytes.length) {
+      const det = el('details', 'sec');
+      const sum = el('summary');
+      sum.append(el('span', null, 'Hex dump'), el('span', 'spacer'));
+      sum.append(btn('Copy base64', (e) => {
+        e.preventDefault();
+        copyText(bytesToBase64(bytes));
+      }));
+      det.append(sum, el('pre', 'source', hexDump(bytes, 64 * 1024)));
+      root.append(det);
+    }
+  };
+  side('Request', c.decoded.req, c.reqBody);
+  side('Response', c.decoded.res, resBytes(c));
+}
+
+function renderWireTree(fields, depth = 0) {
   const wrap = el('div', depth === 0 ? 'tree' : 'node');
   for (const f of fields) wrap.append(renderField(f, depth));
   return wrap;
@@ -409,23 +630,34 @@ function renderField(f, depth) {
     const tog = el('span', 'tog', '');
     row.prepend(tog);
     let child = null;
-    const set = (open) => {
+    let open = startOpen;
+    const set = () => {
       tog.textContent = open ? '▾' : '▸';
-      if (open && !child) {
-        child = renderTree(childFields, depth + 1);
-        box.append(child);
-      }
+      if (open && !child) box.append((child = renderWireTree(childFields, depth + 1)));
       if (child) child.hidden = !open;
     };
-    let open = startOpen;
-    tog.addEventListener('click', () => set((open = !open)));
-    if (label) {
-      const l = el('span', 'hint', label);
-      l.style.cursor = 'pointer';
-      l.addEventListener('click', () => set((open = !open)));
-      row.append(l);
-    }
-    set(open);
+    const flip = () => {
+      open = !open;
+      set();
+    };
+    tog.addEventListener('click', flip);
+    const l = el('span', 'hint', label);
+    l.style.cursor = 'pointer';
+    l.addEventListener('click', flip);
+    row.append(l);
+    set();
+  };
+
+  const altToggle = (label, build) => {
+    const alt = el('span', 'alt', label);
+    row.append(alt);
+    let child = null;
+    alt.addEventListener('click', () => {
+      if (child) {
+        child.remove();
+        child = null;
+      } else box.append((child = build()));
+    });
   };
 
   switch (f.type) {
@@ -433,19 +665,17 @@ function renderField(f, depth) {
       expandable(f.fields, `{ ${f.fields.length} field${f.fields.length === 1 ? '' : 's'} }  ${fmtSize(f.length)}`, depth < 4);
       break;
     case 'string': {
-      row.append(el('span', 'v-str', JSON.stringify(f.value)));
-      if (f.asMessage) {
-        const alt = el('span', 'alt', 'as message');
-        alt.title = 'These bytes are also a valid protobuf message';
-        row.append(alt);
-        let child = null;
-        alt.addEventListener('click', () => {
-          if (child) {
-            child.remove();
-            child = null;
-          } else box.append((child = renderTree(f.asMessage, depth + 1)));
+      const json = parseJsonString(f.value);
+      const shown = json !== undefined && f.value.length > 120 ? `${f.value.slice(0, 120)}…` : f.value;
+      row.append(el('span', 'v-str', JSON.stringify(shown)));
+      if (json !== undefined) {
+        altToggle('as JSON', () => {
+          const d = el('div', 'inline-json');
+          d.append(createJsonView(expandEmbeddedJson(json), { expandDepth: 1, onCopy: copyText }));
+          return d;
         });
       }
+      if (f.asMessage) altToggle('as message', () => renderWireTree(f.asMessage, depth + 1));
       break;
     }
     case 'bytes':
@@ -473,48 +703,6 @@ function renderField(f, depth) {
   return box;
 }
 
-function kvTable(obj) {
-  const t = el('table', 'kv');
-  Object.keys(obj)
-    .sort()
-    .forEach((k) => {
-      const tr = el('tr');
-      tr.append(el('td', null, k), el('td', null, String(obj[k])));
-      t.append(tr);
-    });
-  return t;
-}
-
-function renderHeaders(c) {
-  const root = els.detail;
-  root.append(el('h3', null, 'General'));
-  root.append(kvTable({ URL: c.url, 'HTTP method': c.httpMethod, 'HTTP status': c.status != null ? `${c.status} ${c.statusText || ''}` : '(none)', Transport: c.source, Frame: c.frameUrl || '' }));
-  root.append(el('h3', null, 'Request headers'));
-  root.append(kvTable(c.reqHeaders));
-  root.append(el('h3', null, 'Response headers'));
-  root.append(c.resHeaders ? kvTable(c.resHeaders) : el('p', 'muted', '(none)'));
-  if (c.decoded && c.decoded.res.trailers) {
-    root.append(el('h3', null, 'Trailers'));
-    root.append(kvTable(c.decoded.res.trailers));
-  }
-}
-
-function renderRaw(c) {
-  const root = els.detail;
-  const side = (title, bytes) => {
-    root.append(el('h3', null, `${title} (${fmtSize(bytes ? bytes.length : 0)})`));
-    if (!bytes || !bytes.length) {
-      root.append(el('p', 'muted', '(empty)'));
-      return;
-    }
-    const b64 = el('button', null, 'Copy base64');
-    b64.addEventListener('click', () => copyText(bytesToBase64(bytes)));
-    root.append(b64, el('pre', null, hexDump(bytes, 64 * 1024)));
-  };
-  side('Request body', c.reqBody);
-  side('Response body', resBytes(c));
-}
-
 function hexDump(bytes, max) {
   const n = Math.min(bytes.length, max);
   const lines = [];
@@ -526,6 +714,75 @@ function hexDump(bytes, max) {
   }
   if (n < bytes.length) lines.push(`… ${bytes.length - n} more bytes`);
   return lines.join('\n');
+}
+
+// ---- Timing
+
+function msText(ms) {
+  if (ms == null || Number.isNaN(ms)) return '—';
+  return ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(2)} s`;
+}
+
+function renderTiming(c) {
+  const root = els.detail;
+  const end = c.endTime || Date.now();
+  const total = Math.max(1, end - c.startTime);
+  const pct = (t) => `${((t - c.startTime) / total) * 100}%`;
+  const t = el('table', 'timing');
+  const row = (label, from, to, cls) => {
+    const tr = el('tr');
+    const bar = el('td', 'bar');
+    const track = el('div', 'track');
+    if (from != null && to != null) {
+      const f = el('div', `fill ${cls}`);
+      f.style.left = pct(from);
+      f.style.width = `max(2px, ${((to - from) / total) * 100}%)`;
+      track.append(f);
+    }
+    bar.append(track);
+    tr.append(el('td', null, label), bar, el('td', null, from != null && to != null ? msText(to - from) : '—'));
+    t.append(tr);
+  };
+  root.append(el('p', 'muted', `Started at ${new Date(c.startTime).toLocaleTimeString()}.${String(c.startTime % 1000).padStart(3, '0')}${c.endTime ? '' : ' · still open'}`));
+  row('Waiting for server (TTFB)', c.startTime, c.responseTime, 'wait');
+  row(c.decoded && c.decoded.res.messages.length > 1 ? 'Streaming messages' : 'Content download', c.responseTime, c.responseTime ? end : null, 'dl');
+  const tot = el('tr');
+  const totCell = el('td');
+  totCell.append(el('strong', null, msText(end - c.startTime)));
+  tot.append(el('td', null, 'Total'), el('td'), totCell);
+  t.append(tot);
+  root.append(t);
+
+  const arrivals = messageArrivals(c);
+  if (arrivals.length > 1) {
+    root.append(el('h3', null, `Messages (${arrivals.length})`));
+    const mt = el('table', 'timing');
+    arrivals.forEach((time, i) => {
+      const tr = el('tr');
+      const bar = el('td', 'bar');
+      const track = el('div', 'track');
+      if (time) {
+        const f = el('div', 'fill msg');
+        f.style.left = pct(time);
+        track.append(f);
+      }
+      bar.append(track);
+      const size = c.decoded.res.messages[i] ? fmtSize(c.decoded.res.messages[i].size) : '';
+      tr.append(el('td', null, `#${i + 1}  ${size}`), bar, el('td', null, time ? `+${msText(time - c.startTime)}` : '—'));
+      mt.append(tr);
+    });
+    root.append(mt);
+  }
+}
+
+// When each response message arrived, from the chunk timestamps and frame end offsets.
+function messageArrivals(c) {
+  const msgs = (c.decoded && c.decoded.res.messages) || [];
+  return msgs.map((m) => {
+    if (m.end == null) return null;
+    const mark = c.chunkMarks.find(([offset]) => offset >= m.end);
+    return mark ? mark[1] : null;
+  });
 }
 
 // ------------------------------------------------------------------ DevTools network log fallback
@@ -601,15 +858,20 @@ els.preserve.addEventListener('change', () => {
   prefs.preserve = els.preserve.checked;
   savePrefs();
 });
-els.jsonView.addEventListener('change', () => {
-  prefs.json = els.jsonView.checked;
+const zoomBy = (dir) => {
+  const cur = prefs.zoom || 1.25;
+  const i = ZOOMS.findIndex((z) => z >= cur - 0.001);
+  prefs.zoom = ZOOMS[Math.max(0, Math.min(ZOOMS.length - 1, (i < 0 ? ZOOMS.length - 1 : i) + dir))];
   savePrefs();
-  renderDetail();
-});
+  applyZoom();
+};
+$('#zoomIn').addEventListener('click', () => zoomBy(1));
+$('#zoomOut').addEventListener('click', () => zoomBy(-1));
 document.querySelectorAll('.tabs button').forEach((b) =>
   b.addEventListener('click', () => {
     activeTab = prefs.tab = b.dataset.tab;
     savePrefs();
+    els.detail.scrollTop = 0;
     renderDetail();
   }),
 );

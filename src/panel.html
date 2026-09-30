@@ -7,11 +7,16 @@
   </head>
   <body>
     <header class="toolbar">
-      <button id="clear" title="Clear">⊘</button>
+      <button id="clear" class="icon" title="Clear">⊘</button>
       <label><input type="checkbox" id="preserve" /> Preserve log</label>
       <input id="filter" type="search" placeholder="Filter by service, method or URL" />
       <label><input type="checkbox" id="errorsOnly" /> Errors only</label>
       <span class="spacer"></span>
+      <span class="zoom">
+        <button id="zoomOut" title="Smaller">A−</button>
+        <span id="zoomLabel"></span>
+        <button id="zoomIn" title="Bigger">A+</button>
+      </span>
       <button id="export" title="Download all captured calls as JSON">Export</button>
       <span id="count" class="muted"></span>
     </header>
@@ -20,8 +25,9 @@
         <table id="list">
           <thead>
             <tr>
-              <th class="c-method">Method</th>
+              <th class="c-method">Name</th>
               <th class="c-status">Status</th>
+              <th class="c-type">Type</th>
               <th class="c-msgs" title="Request / response messages">Msgs</th>
               <th class="c-size">Size</th>
               <th class="c-time">Time</th>
@@ -36,17 +42,17 @@
       </section>
       <section id="detailPane" hidden>
         <div class="detail-head">
-          <button id="closeDetail" title="Close">✕</button>
+          <button id="closeDetail" class="icon" title="Close">✕</button>
           <div class="tabs">
-            <button data-tab="request">Request</button>
-            <button data-tab="response" class="active">Response</button>
             <button data-tab="headers">Headers</button>
-            <button data-tab="raw">Raw</button>
+            <button data-tab="payload">Payload</button>
+            <button data-tab="preview">Preview</button>
+            <button data-tab="response">Response</button>
+            <button data-tab="protobuf">Protobuf</button>
+            <button data-tab="timing">Timing</button>
           </div>
-          <span class="spacer"></span>
-          <label class="view-toggle"><input type="checkbox" id="jsonView" /> JSON</label>
         </div>
-        <div id="summary"></div>
+        <div id="subbar" class="subbar"></div>
         <div id="detail"></div>
       </section>
     </main>

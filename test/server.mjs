@@ -12,6 +12,7 @@ const page = `<!doctype html><meta charset="utf-8"><title>gRPC demo</title>
 <button id="stream">fetch server stream</button>
 <button id="error">grpc error</button>
 <button id="connect">connect json</button>
+<button id="json">json inside string</button>
 <button id="plain">plain fetch (ignored)</button>
 <pre id="log"></pre>
 <script type="module">
@@ -43,6 +44,10 @@ document.getElementById('error').onclick = async () => {
 document.getElementById('connect').onclick = async () => {
   await fetch('/demo.v1.UserService/ListUsers', { method: 'POST', headers: { 'content-type': 'application/json', 'connect-protocol-version': '1' }, body: JSON.stringify({ pageSize: 2 }) });
   log('connect done');
+};
+document.getElementById('json').onclick = async () => {
+  await fetch('/demo.v1.PropertyService/GetPropertyData', { method: 'POST', headers: h, body: frame(req(5)) });
+  log('json done');
 };
 document.getElementById('plain').onclick = async () => { await fetch('/api/plain'); log('plain done'); };
 </script>`;
@@ -85,6 +90,11 @@ export function start(port = 8787) {
           }
         }, 150);
         return;
+      }
+      if (url.endsWith('/GetPropertyData')) {
+        const data = { demo_sorolla: { ticker: 'demo_sorolla', type: 'HOTEL', inventories: Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`ROOM_${i}`, { ticker: `ROOM_${i}`, name: '1 adulto, Sólo alojamiento', active: true, order: i, discountTickers: ['A_agr', 'B_agr'] }])) } };
+        res.writeHead(200, grpcHeaders);
+        return res.end(concat(frame(message([[1, JSON.stringify(data, null, 2)], [2, 'es']])), trailerFrame({ 'grpc-status': 0 })));
       }
       if (url.endsWith('/DeleteUser')) {
         res.writeHead(200, { ...grpcHeaders, 'grpc-status': '7', 'grpc-message': 'caller%20cannot%20delete%20users' });

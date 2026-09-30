@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "gRPC Inspector",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DevTools panel that captures and decodes gRPC-Web and Connect requests without touching your app code.",
   "icons": {
     "16": "icons/icon16.png",

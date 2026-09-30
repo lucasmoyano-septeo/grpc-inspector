@@ -21,7 +21,14 @@ The public gRPC devtools extensions only work if the app registers an intercepto
 - **Schemaless protobuf decoding**: field numbers, wire types, nested messages, repeated fields, packed varints, signed/zigzag/bool hints, float/double views, timestamp hints. Ambiguous bytes (a string that is also a valid message) can be flipped with *as message*.
 - **Streaming**: server-streaming calls update live, message by message.
 - **Status**: `grpc-status` / `grpc-message` from trailers, trailers-only responses, Connect end-stream and Connect unary errors.
-- Tree or JSON view, copy a message or a whole stream as JSON, hex dump, export all calls to a JSON file, filter, errors only, preserve log.
+- Chrome-like tabs per call:
+  - **Headers**: General, Response headers, Trailers, Request headers; each section collapsible, with a Raw view.
+  - **Payload**: request message as a collapsible tree, or *View source*.
+  - **Preview**: response as a collapsible JSON tree. Strings that contain JSON are parsed and shown as objects (badge *JSON string*). Expand all / Collapse all, Alt+click expands a subtree, find-in-body with highlight, copy any node.
+  - **Response**: body text with *Pretty print* and *Wrap lines* toggles, syntax highlight.
+  - **Protobuf**: wire-level view (field numbers, wire types, alternative interpretations) and hex dump.
+  - **Timing**: waiting (TTFB), download/streaming, and when each stream message arrived.
+- Zoom (A− / A+), export all calls to a JSON file, filter, errors only, preserve log.
 - Calls made before the panel was opened are kept (per-tab buffer in the service worker).
 - Requests the page hooks cannot see (Web Workers) are picked up from the DevTools network log as a fallback (request bytes may be less exact there).
 
