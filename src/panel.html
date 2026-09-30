@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>gRPC Inspector</title>
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="toolbar">
+      <button id="clear" title="Clear">⊘</button>
+      <label><input type="checkbox" id="preserve" /> Preserve log</label>
+      <input id="filter" type="search" placeholder="Filter by service, method or URL" />
+      <label><input type="checkbox" id="errorsOnly" /> Errors only</label>
+      <span class="spacer"></span>
+      <button id="export" title="Download all captured calls as JSON">Export</button>
+      <span id="count" class="muted"></span>
+    </header>
+    <main>
+      <section id="listPane">
+        <table id="list">
+          <thead>
+            <tr>
+              <th class="c-method">Method</th>
+              <th class="c-status">Status</th>
+              <th class="c-msgs" title="Request / response messages">Msgs</th>
+              <th class="c-size">Size</th>
+              <th class="c-time">Time</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div id="empty" class="empty">
+          <p>No gRPC calls captured yet.</p>
+          <p class="muted">gRPC-Web (binary and text) and Connect calls made with fetch or XHR show up here.<br />Reload the page if it was already open before the extension was installed.</p>
+        </div>
+      </section>
+      <section id="detailPane" hidden>
+        <div class="detail-head">
+          <button id="closeDetail" title="Close">✕</button>
+          <div class="tabs">
+            <button data-tab="request">Request</button>
+            <button data-tab="response" class="active">Response</button>
+            <button data-tab="headers">Headers</button>
+            <button data-tab="raw">Raw</button>
+          </div>
+          <span class="spacer"></span>
+          <label class="view-toggle"><input type="checkbox" id="jsonView" /> JSON</label>
+        </div>
+        <div id="summary"></div>
+        <div id="detail"></div>
+      </section>
+    </main>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

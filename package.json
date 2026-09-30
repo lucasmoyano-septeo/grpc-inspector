@@ -1,0 +1,16 @@
+{
+  "name": "grpc-inspector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chromium DevTools extension (Brave, Chrome, Edge) that captures and decodes gRPC-Web and Connect calls.",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/decode.test.mjs",
+    "test:e2e": "node test/e2e.mjs",
+    "zip": "cd src && zip -r ../grpc-inspector.zip . -x '.*'"
+  },
+  "devDependencies": {
+    "playwright": "^1.55.0"
+  },
+  "license": "MIT"
+}
